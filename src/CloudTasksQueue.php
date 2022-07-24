@@ -105,16 +105,25 @@ class CloudTasksQueue extends LaravelQueue implements QueueContract
         $httpRequest = $this->createHttpRequest();
         $httpRequest->setUrl($this->getHandler());
         $httpRequest->setHttpMethod(HttpMethod::POST);
-        $httpRequest->setBody(
-            // Laravel 7+ jobs have a uuid, but Laravel 6 doesn't have it.
-            // Since we are using and expecting the uuid in some places
-            // we will add it manually here if it's not present yet.
-            $this->withUuid($payload)
-        );
+
+        // Laravel 7+ jobs have a uuid, but Laravel 6 doesn't have it.
+        // Since we are using and expecting the uuid in some places
+        // we will add it manually here if it's not present yet.
+        $payload = $this->withUuid($payload);
+
+        // Since 3.x tasks are released back onto the queue after an exception has
+        // been thrown. This means we lose the native [X-CloudTasks-TaskRetryCount] header
+        // value and need to manually set and update the number of times a task has been attempted.
+        $payload = $this->withAttempts($payload);
+
+        $httpRequest->setBody($payload);
 
         $task = $this->createTask();
         $task->setHttpRequest($httpRequest);
 
+        // The deadline for requests sent to the app. If the app does not respond by
+        // this deadline then the request is cancelled and the attempt is marked as
+        // a failure. Cloud Tasks will retry the task according to the RetryConfig.
         if (!empty($this->config['dispatch_deadline'])) {
             $task->setDispatchDeadline(new Duration(['seconds' => $this->config['dispatch_deadline']]));
         }
@@ -139,6 +148,20 @@ class CloudTasksQueue extends LaravelQueue implements QueueContract
 
         if (!isset($decoded['uuid'])) {
             $decoded['uuid'] = (string) Str::uuid();
+        }
+
+        return json_encode($decoded);
+    }
+
+    private function withAttempts(string $payload): string
+    {
+        /** @var array $decoded */
+        $decoded = json_decode($payload, true);
+
+        if (!isset($decoded['internal']['attempts'])) {
+            $decoded['internal']['attempts'] = 0;
+        } else {
+            $decoded['internal']['attempts']++;
         }
 
         return json_encode($decoded);
